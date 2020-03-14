@@ -1,0 +1,37 @@
+#!/usr/bin/env python
+import rospy
+import numpy as np
+import cv2
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+
+class ImageProjection():
+    def __init__(self):
+        self.sub_image_original = rospy.Subscriber('/camera/rgb/image_raw', Image, self.cbImageProjectionStop, queue_size=1)
+        self.pub_image_Stopprojected = rospy.Publisher('/imageStop', Image, queue_size=1)
+        self.cvBridge = CvBridge()
+        
+    
+    def cbImageProjectionStop(self, msg_img):
+        cv_image_original = self.cvBridge.imgmsg_to_cv2(msg_img, "bgr8")
+        # adding Gaussian blur to the image of original
+        cv_image_original = cv2.GaussianBlur(cv_image_original, (5, 5), 0)
+        small = cv2.resize(cv_image_original, (0,0), fx=0.5, fy=0.5)
+        pts_src = np.array([[227, 420 ],  [400 , 420 ], [410 , 406 ],[200 , 406 ]])
+        #pts_dst = np.array([[200, 0], [800, 0], [800, 600], [200, 600]])
+        pts_dst = np.array([[180, 400], [600, 400], [600, 530], [180, 530]])
+        h, status = cv2.findHomography(pts_src, pts_dst)
+        cv_image_homography = cv2.warpPerspective(small, h, (1000, 600))
+        triangle1 = np.array([[0, 599], [0, 340], [200, 599]], np.int32)
+        triangle2 = np.array([[999, 599], [999, 340], [799, 599]], np.int32)
+        black = (0, 0, 0)
+        white = (255, 255, 255)
+        cv_image_homography = cv2.fillPoly(cv_image_homography, [triangle1, triangle2], black)
+        self.pub_image_Stopprojected.publish(self.cvBridge.cv2_to_imgmsg(cv_image_homography, "bgr8"))
+    def main(self):
+        rospy.spin()
+
+if __name__ == '__main__':
+    rospy.init_node('image_projection')
+    node = ImageProjection()
+    node.main()

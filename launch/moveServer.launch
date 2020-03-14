@@ -1,0 +1,27 @@
+
+
+<launch>
+    <arg name="arg1" default="PINK"/>
+    <arg name="arg2" default="RED"/>
+    <arg name="arg3" default="GREEN"/>
+    <arg name="arg4" default="BLUE"/>
+    <!--Calibration is done by config file passed as rosparam. Setting calibration_mode you can do a manual configuration--> 
+
+    <!-- image projection -->
+    <node name="image_projection" pkg="final_project" type="image_projection" output="screen"></node>
+    <!-- traffic sign detection -->
+
+    <!-- obstacle detection -->
+    <node name="detect_obstacle" pkg="final_project" type="detect_obstacle" output="screen"></node>
+    
+    <!-- lane detect -->
+    <node name="detect_lane" pkg="final_project" type="detect_lane" output="screen"></node>
+    <!-- lane control -->
+    <node name="control_lane" pkg="final_project" type="control_lane" output="screen"></node>
+    <param name="arg_1" value="$(arg arg1)" />
+    <param name="arg_2" value="$(arg arg2)" />
+    <param name="arg_3" value="$(arg arg3)" />
+    <param name="arg_4" value="$(arg arg4)" />
+
+
+</launch>

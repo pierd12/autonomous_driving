@@ -1,0 +1,444 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import rospy
+import time
+import numpy as np
+from std_msgs.msg import Float64,UInt8
+from geometry_msgs.msg import Twist
+import rospy
+from nav_msgs.msg import Odometry
+# Brings in the SimpleActionClient
+import actionlib
+import sys
+
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+
+import math
+# Brings in the .action file and messages used by the move base action
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
+class ControlLane():
+    def __init__(self):
+        self.res = False
+        self.distxy = [100,100]
+        self.back_x = 0
+        self.back_y = 0
+        self.looping = True
+        self.rot = False
+        self.next_dir = 0
+        self.need_rotate = False
+        self.sub_odom = rospy.Subscriber('/odom', Odometry, self.robotPose)
+        self.sub_stop = rospy.Subscriber('stop', Float64, self.cbStop, queue_size = 1)
+        self.sub_obs = rospy.Subscriber('obstacle', Float64, self.cbPassing, queue_size = 1)
+        self.pub_cmd_vel = rospy.Publisher('cmd_vel', Twist, queue_size = 1)
+        self.pub_pass = rospy.Publisher('pass', Float64, queue_size = 1)
+        self.is_stop = 0
+        self.is_obstacle = 0
+        self.currx = 3.4
+        self.curry = -1.6
+        
+        self.pathlen = 0
+        self.path = []
+        self.w = 0.7
+        self.z = 0.7
+        self.direction = 0 #0=forward 1=right 2=left 3=backward
+        rospy.on_shutdown(self.fnShutDown)
+        
+
+    def fnShutDown(self):
+        rospy.loginfo("Shutting down. cmd_vel will be 0")
+        self.looping = False
+        self.twistin(0,0)
+    def cbStop(self,dis):
+        if (self.is_stop == 0 and self.res and self.rot):
+                self.is_stop = 1
+                
+        return
+    def cbPassing(self,msg):
+        self.res = False
+        self.is_obstacle = 1
+        self.client.cancel_all_goals()
+        dist = msg.data
+        if dist == 1.:
+            print("passing")
+            self.twistin(0.2,0)
+        elif dist == 2.:
+            print("go to the right ")
+            if self.direction == 0:
+                self.go_back_to_lane(self.back_x-self.currx,0,0.7,0.7,0.97,0)
+            elif self.direction == 1:
+                self.go_back_to_lane(0.1,-0.2,1,0,0.7,-0.7)
+            elif self.direction == 2:
+                self.go_back_to_lane(0,self.back_y-self.curry,0,0.97,0.7,0.7)
+            elif self.direction == 3:
+                self.go_back_to_lane(self.back_x-self.currx,0,0.7,-0.7,0,1)
+
+        else:
+            print("obstacle avoid!!")
+            print(self.direction)
+            self.back_x = self.currx
+            self.back_y = self.curry
+            if self.direction == 0:
+                self.go_left_lane(-0.5,dist,0.7,0.7,0,1)
+            elif self.direction == 1:
+                self.go_left_lane(dist+0.3,0.2,1,0,0.7,0.7)
+            elif self.direction == 2:
+                self.go_left_lane(-dist,-0.5,0,0.97,0.7,-0.7)
+            elif self.direction == 3:
+                self.go_left_lane(0.5,-dist,0.7,-0.7,1,0)
+                
+    def twistin(self,x,z):
+        twist = Twist()
+        twist.linear.x = x
+        twist.linear.y = 0
+        twist.linear.z = 0
+        twist.angular.x = 0
+        twist.angular.y = 0
+        twist.angular.z = z
+        self.pub_cmd_vel.publish(twist)
+        return          
+    def go_left_lane(self,x,y,w,z,rotw,rotz):
+        print("turning")
+        self.pass_obj(self.currx,self.curry,rotw,rotz)
+        print("left")
+        self.pass_obj(self.currx+x,self.curry+y,w,z)
+        print("sending to pass")
+        self.pub_pass.publish(1.)
+    def go_back_to_lane(self,x,y,w,z,rotw,rotz):
+        print("turning in left")
+        self.pass_obj(self.currx,self.curry,rotw,rotz)
+        print("go back to right")
+        self.pass_obj(self.currx+x,self.curry+y,w,z)
+        print("sending to pass")
+        self.pub_pass.publish(2.)
+        print("go back to targets")
+        self.back_to_targets()
+
+    def back_to_targets(self):
+        # if self.direction == 0:
+        #     if(self.curry > self.distxy[1]):
+        #         self.currPath = self.currPath + 1
+        self.movebase_client()
+        self.res = True
+
+    def pass_obj(self,x,y,w,z):
+        self.client = actionlib.SimpleActionClient('move_base',MoveBaseAction)
+        self.client.wait_for_server()
+        goal = MoveBaseGoal()
+        goal.target_pose.header.frame_id = "map"
+        goal.target_pose.header.stamp = rospy.Time.now()
+        goal.target_pose.pose.position.x = x
+        goal.target_pose.pose.position.y = y
+        goal.target_pose.pose.orientation.w = w
+        goal.target_pose.pose.orientation.z = z
+        self.client.send_goal(goal)
+        print("Moving")
+        self.client.wait_for_result()
+
+    def robotPose(self,msg):
+        self.currx = msg.pose.pose.position.x
+        self.curry = msg.pose.pose.position.y
+        self.currow = msg.pose.pose.orientation.w
+        self.curroz = msg.pose.pose.orientation.z
+        
+    def move_robot(self):
+        while(self.looping):
+            if self.res:
+                if (self.currPath < self.pathlen-1):
+                    if (not self.rot):#check if should turn
+                        self.rotate()
+                    elif(self.rot):
+                        if(self.is_stop == 1):
+                            self.client.cancel_all_goals()
+                            self.stop_in_line()
+                            self.twistin(0,0)
+                            time.sleep(3)
+                            self.rotation()
+                            self.is_stop = 0
+                            self.rot = False
+                            self.currPath = self.currPath+1
+                            self.movebase_client()
+                        elif self.go_next_pos():
+                            print("ok")
+                            self.rotation()
+                            self.rot = False
+                            self.is_stop = 0
+                    if ((self.go_next_pos() and not self.rot) or  self.client.get_state() == 3 ):#going forward
+                        print("moving")
+                        self.rot = False
+                        self.currPath = self.currPath+1
+                        self.movebase_client()
+                        #print("sent")
+                else:
+                    print ("done")
+                    break
+            else:
+                continue
+    def go_next_pos(self):
+        if abs(self.distxy[0]-self.currx) < 0.3:
+            if abs(self.distxy[1]-self.curry) < 0.3:
+                #print(self.distxy[0]-self.currx)
+                return True
+        return False
+    def rotate(self):
+        # print(self.path[self.currPath])
+        # print (self.direction)
+        if self.direction == 0:
+            if self.distxy[0]>self.nodes[int(self.path[self.currPath+1])][0]:
+                self.w = 0
+                self.z = 1
+                self.next_dir = 2
+                print("should rotate")
+                self.rot = True
+                return True 
+            if self.distxy[0]<self.nodes[int(self.path[self.currPath+1])][0]:
+                self.w = 1
+                self.z = 0
+                self.next_dir = 1
+                print("should rotate")
+                self.rot = True
+                return True
+        if self.direction == 2:
+            if self.distxy[1]>self.nodes[int(self.path[self.currPath+1])][1]:
+                self.w = 0.7
+                self.z = -0.7
+                self.next_dir = 3
+                print("should rotate")
+                self.rot = True
+                return True 
+            if self.distxy[1]<self.nodes[int(self.path[self.currPath+1])][1]:
+                self.w = 0.7
+                self.z = 0.7
+                self.next_dir = 0
+                print("should rotate")
+                self.rot = True
+                return True 
+        if self.direction == 3:
+            if self.distxy[0]>self.nodes[int(self.path[self.currPath+1])][0]:
+                self.w = 0
+                self.z = 1
+                self.next_dir = 2
+                print("should rotate")
+                self.rot = True
+                return True 
+            if self.distxy[0]<self.nodes[int(self.path[self.currPath+1])][0]:
+                self.w = 1
+                self.z = 0
+                self.next_dir = 1
+                print("should rotate")
+                self.rot = True
+                return True
+        if self.direction == 1:
+            if self.distxy[1]>self.nodes[int(self.path[self.currPath+1])][1]:
+                self.w = 0.7
+                self.z = -0.7
+                self.next_dir = 3
+                print("should rotate")
+                self.rot = True
+                return True 
+            if self.distxy[1]<self.nodes[int(self.path[self.currPath+1])][1]:
+                self.w = 0.7
+                self.z = 0.7
+                self.next_dir = 0
+                print("should rotate")
+                self.rot = True
+                return True 
+    def rotation(self):
+        self.client = actionlib.SimpleActionClient('move_base',MoveBaseAction)
+        self.client.wait_for_server()
+        goal = MoveBaseGoal()
+        goal.target_pose.header.frame_id = "map"
+        goal.target_pose.header.stamp = rospy.Time.now()
+        goal.target_pose.pose.position.x = self.distxy[0]
+        goal.target_pose.pose.position.y = self.distxy[1]
+        goal.target_pose.pose.orientation.w = self.w
+        goal.target_pose.pose.orientation.z = self.z
+        self.client.send_goal(goal)
+        print("driving to the goal through rotation {}".format(self.path[self.currPath]))
+        
+        self.client.wait_for_result()
+        self.direction = self.next_dir
+        #self.client.wait_for_result()
+    def stop_in_line(self):
+        print("stoping")
+        if (self.direction == 0):
+            self.pass_obj(self.currx,self.curry+0.1,0.7,0.7)
+            print("Stoped")
+        if (self.direction == 1):
+            self.pass_obj(self.currx+0.1,self.curry,1,0)
+            print("Stoped")
+        if (self.direction == 2):
+            self.pass_obj(self.currx-0.1,self.curry,0,1)
+            print("Stoped")
+        if (self.direction == 3):
+            self.pass_obj(self.currx,self.curry-0.1,0.7,-0.7)
+            print("Stoped")
+
+        
+    def movebase_client(self):
+        self.client = actionlib.SimpleActionClient('move_base',MoveBaseAction)
+        self.client.wait_for_server()
+        goal = MoveBaseGoal()
+        goal.target_pose.header.frame_id = "map"
+        goal.target_pose.header.stamp = rospy.Time.now()
+        self.distxy = self.nodes[int(self.path[self.currPath])]
+        print("driving to the goal through {}".format(self.path[self.currPath]))
+        goal.target_pose.pose.position.x = self.distxy[0]
+        goal.target_pose.pose.position.y = self.distxy[1]
+        goal.target_pose.pose.orientation.w = self.w
+        goal.target_pose.pose.orientation.z = self.z
+        self.client.send_goal(goal)
+    def main(self):
+        self.init_paths()
+        self.path = self.path1 + self.path2[1:len(self.path2)] + self.path3[1:len(self.path3)] + self.path4[1:len(self.path4)]  
+        self.pathlen = len(self.path)
+        print(self.path)
+        self.targetNum = 1
+        self.currPath = 0
+        self.movebase_client()
+        self.res = True
+        self.move_robot()
+
+    def find_all_paths(self,graph, start, end, path=[]):
+        path = path + [start]
+        if start == end:
+            return [path]
+        if not graph.has_key(start):
+            return []
+        paths = []
+        for node in graph[start]:
+            if node not in path:
+                newpaths = self.find_all_paths(graph, node, end, path)
+                for newpath in newpaths:
+                    paths.append(newpath)
+        return paths
+    def shortest_path(self,graphs,n1,n2,n3):
+        leni = len(graphs[0])
+        x = 0
+        for i in range (len(graphs)):
+            if (leni > len(graphs[i]) and n1 not in graphs[i] and n2 not in graphs[i] and n3 not in graphs[i]):
+                leni = len(graphs[i])
+                x = i
+        return x
+    def init_paths(self):
+        self.get_params()
+        self.nodes = self.init_nodes()
+        # print(self.arg_1)
+        # print(self.arg_2)
+        # print(self.arg_3)
+        # print(self.arg_4)
+        graph = self.init_graph()
+        paths = self.find_all_paths(graph,self.arg0,self.arg_1,[])
+        sh_path = self.shortest_path(paths,self.arg_2,self.arg_3,self.arg_4)
+        self.path1 = paths[sh_path]
+        # print(self.path1)
+
+        paths = self.find_all_paths(graph,self.arg_1,self.arg_2,[])
+        sh_path = self.shortest_path(paths,"100",self.arg_3,self.arg_4)
+        self.path2 = paths[sh_path]
+        # print(self.path2)
+
+        paths = self.find_all_paths(graph,self.arg_2,self.arg_3,[])
+        sh_path = self.shortest_path(paths,"100","100",self.arg_4)
+        self.path3 = paths[sh_path]
+        # print(self.path3)
+
+        paths = self.find_all_paths(graph,self.arg_3,self.arg_4,[])
+        sh_path = self.shortest_path(paths,"100","100","100")
+        self.path4 = paths[sh_path]
+        # print(self.path4)
+    def init_graph(self):
+        graph =  {"0": {"1"},#Start
+        "1": {"3","13"},
+        "2": {"4","10"},
+        "3": {"6"},
+        "4": {"7","32"},
+        "5":{"10","15","10","16"},
+        "6":{"11","24"},
+        "7":{"6","11"},
+        "8":{"13","14"},
+        "9":{"15","14","20","21"},
+        "10":{"17"},
+        "11":{"18"},
+        "12":{},
+        "13":{"2","5","14"},
+        "14":{"20","31"},
+        "15":{"21","22"},
+        "16":{"23","25"},
+        "17":{"24","32"},
+        "18":{"25"},
+        "19":{"15","26"},
+        "20":{"1"},
+        "21":{"29"},
+        "22":{"28"},
+        "23":{"29"},
+        "24":{"12","32"},
+        "25":{"23","28"},
+        "26":{"30","22"},
+        "27":{"1"},
+        "28":{"9","10","30"},
+        "29":{"27","26"},
+        "30":{"2","14"},
+        "31":{"19"},
+        "32":{"7","8"}
+        }
+        return graph
+    def init_nodes(self):
+        nodes = [
+        [3.4,-1.6],#start0
+        [3.4,0.12],# 1
+        [0.22,0.12],# 2
+        [3.4,4.16],# 3
+        [0.22,2.53],# 4=p
+        [-0.35,0.12],# 5
+        [-0.35,4.16],# 6
+        [0.22,4.16],#  7
+        [2.82,3.44],# 8
+        [-0.35,-0.46],# 9=green
+        [-2.85,0.12],# 10
+        [-3.42,4.16],# 11
+        [-0.35,1.82],# 12
+        [2.82,0.12],# 13
+        [2.82,-0.46],# 14
+        [-0.35,-3.82],# 15
+        [-3.48,0.12],# 16
+        [-2.85,3.44],# 17
+        [-3.42,2.96],# 18=red
+        [1.89,-3.82],#19 blue
+        [3.4,-0.46],#20
+        [-0.35,-4.35],#21
+        [-2.85,-3.82],#22
+        [-3.24,-4.35],#23
+        [-0.35,3.44],#24
+        [-3.42,-0.46],#25
+        [0.22,-3.82],#26
+        [3.27,-4.35],#27
+        [-2.85,-0.46],# 28
+        [0.22,-4.35],# 29
+        [0.22,-0.46],# 30
+        [2.82,-3.82],# 31
+        [0.22,3.44]#32
+        ]
+        return nodes
+    def get_params(self):
+        self.arg0 = "0"
+        arg_1 = rospy.get_param('/arg_1')
+        self.arg_1 =self.get_index(arg_1)
+        arg_2 = rospy.get_param('/arg_2')
+        self.arg_2 =self.get_index(arg_2)
+        arg_3 = rospy.get_param('/arg_3')
+        self.arg_3 =self.get_index(arg_3)
+        arg_4 = rospy.get_param('/arg_4')
+        self.arg_4 =self.get_index(arg_4)
+    def get_index(self,arg):
+        if (arg == "PINK"):
+            return "4"
+        elif arg == "RED":
+            return "18"
+        elif arg == "GREEN":
+            return "9"
+        elif arg == "BLUE":
+            return "19"
+if __name__ == '__main__':
+    rospy.init_node('control_lane',anonymous=True)
+    node = ControlLane()
+    node.main()
